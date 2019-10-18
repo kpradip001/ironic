@@ -18,6 +18,7 @@ DRAC inspection interface
 from datetime import datetime
 import json
 import re
+import xml.etree.ElementTree as ET
 
 from ironic_lib import metrics_utils
 from oslo_log import log as logging
@@ -41,13 +42,11 @@ LOG = logging.getLogger(__name__)
 
 METRICS = metrics_utils.get_metrics_logger(__name__)
 
-sushy = importutils.try_import('sushy')
-
 # System Configuration Tag Constant
 _SYSTEM_CONFIG_TAG = '<SystemConfiguration Model'
 
 # Time Out Constant
-_TIMEOUT_SECONDS = 120
+_TIMEOUT_SECONDS = 60
 
 # Job Id Url Constant
 _JOB_ID_URL = '/redfish/v1/Managers/iDRAC.Embedded.1/Actions/Oem/' \
@@ -86,50 +85,37 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
 
         """
         super(DracRedfishInspect, self).inspect_hardware(task)
+
         node = task.node
-        system = redfish_utils.get_system(node)
-        pxe_dev_nics = self._get_pxe_dev_nics(task, system)
+        pxe_dev_nics = self._get_pxe_dev_nics(task)
         if pxe_dev_nics is None:
             LOG.warning("No PXE enabled NIC was found for node "
                         "%(node_uuid)s.", {'node_uuid': node.uuid})
 
-        if (system.ethernet_interfaces
-                and system.ethernet_interfaces.summary):
-            macs = system.ethernet_interfaces.summary
-
-            enabled_macs = {nic_mac: nic_state
-                            for nic_mac, nic_state in macs.items()
-                            if nic_state == sushy.STATE_ENABLED}
-            if enabled_macs:
-                port_object = objects.Port(task.context)
-                for k_v_pair in enabled_macs.items():
-                    mac = k_v_pair[0]
-                    port = port_object.get_by_address(task.context, mac)
-                    if port.pxe_enabled != (mac in pxe_dev_nics):
-                        port.pxe_enabled = (mac in pxe_dev_nics)
-                        port.save()
-                        LOG.info('Port updated with pxe enabled %(pxe)s '
-                                 'for node %(node_uuid)s during inspection',
-                                 {'pxe': port.pxe_enabled,
-                                  'node_uuid': node.uuid})
-            else:
-                LOG.warning("Not attempting to update any port as no NICs "
-                            "were discovered in 'enabled' state for node "
-                            "%(node)s: %(mac_data)s",
-                            {'mac_data': macs, 'node': node.uuid})
+        ports = objects.Port.list_by_node_id(task.context, node.id)
+        if ports:
+            for port in ports:
+                is_pxe_dev_nic = (port.address.upper() in pxe_dev_nics)
+                if port.pxe_enabled != is_pxe_dev_nic:
+                    port.pxe_enabled = is_pxe_dev_nic
+                    port.save()
+                    LOG.info('Port updated with pxe enabled %(pxe)s '
+                             'for node %(node_uuid)s during inspection',
+                             {'pxe': port.pxe_enabled, 'node_uuid': node.uuid})
         else:
-            LOG.warning("No NIC information discovered "
+            LOG.warning("No port information discovered "
                         "for node %(node)s", {'node': node.uuid})
 
         return states.MANAGEABLE
 
-    def _get_pxe_dev_nics(self, task, system):
+    def _get_pxe_dev_nics(self, task):
         """Get a list of pxe device interfaces.
 
         :param task: a TaskManager instance.
-        :param system: a Redfish System object that represents a node.
         :returns: Returns list of pxe device interfaces.
         """
+        system = redfish_utils.get_system(task.node)
+
         pxe_dev_nics = []
         pxe_params = ["PxeDev1EnDis", "PxeDev2EnDis",
                       "PxeDev3EnDis", "PxeDev4EnDis"]
@@ -144,6 +130,7 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
             for param, nic in zip(pxe_params, pxe_nics):
                 if system.bios.attributes[param] == 'Enabled':
                     nic_id = system.bios.attributes[nic]
+                    # Get MAC address of the given nic_id
                     mac_response = requests.get('%s%s%s' % (
                         redfish_ip, _MAC_URL, nic_id), auth=(
                         redfish_username, redfish_password), verify=False)
@@ -171,21 +158,25 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
                 LOG.error('FAIL: detailed error message: %(err)',
                           {'err': job_response.__dict__['_content']})
                 raise exception.HardwareInspectionFailure(error=exc)
+
             start_time = datetime.now()
+
             while True:
                 current_time = (datetime.now() - start_time)
                 xml_data = requests.get('%s%s%s' % (
                     redfish_ip, _XML_DATA_URL, job_id), headers=_HEADERS,
                     auth=(redfish_username, redfish_password), verify=False)
+
                 if _SYSTEM_CONFIG_TAG in str(xml_data.__dict__):
-                    export_list = xml_data.__dict__.get('_content').split('\n')
-                    export_list = [line for line in export_list
-                                   if 'FQDD' in line or 'PXE' in line]
-                    for i, line in enumerate(export_list):
-                        if 'PXE' in line:
-                            nic_id = export_list[i - 1].split('"')[1]
+                    xml_string = xml_data.__dict__.get('_content')
+                    root = ET.fromstring(xml_string)
+                    for child in root:
+                        nic_id = [child.attrib.get('FQDD') for ch in child
+                                  if ch.text == 'PXE']
+                        if nic_id:
+                            # Get MAC address of the given nic_id
                             mac_response = requests.get('%s%s%s' % (
-                                redfish_ip, _MAC_URL, nic_id), auth=(
+                                redfish_ip, _MAC_URL, nic_id[0]), auth=(
                                 redfish_username, redfish_password),
                                 verify=False)
                             mac_address = json.loads(mac_response.__dict__.get(
