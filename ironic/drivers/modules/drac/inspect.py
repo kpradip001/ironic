@@ -131,11 +131,8 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
                 if system.bios.attributes[param] == 'Enabled':
                     nic_id = system.bios.attributes[nic]
                     # Get MAC address of the given nic_id
-                    mac_response = requests.get('%s%s%s' % (
-                        redfish_ip, _MAC_URL, nic_id), auth=(
-                        redfish_username, redfish_password), verify=False)
-                    mac_address = json.loads(mac_response.__dict__.get(
-                        '_content')).get('MACAddress')
+                    mac_address = self._get_mac_address(
+                        nic_id, redfish_ip, redfish_username, redfish_password)
                     pxe_dev_nics.append(mac_address)
 
         elif system.boot.mode == 'bios':
@@ -145,17 +142,19 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
                 redfish_username, redfish_password))
 
             if job_response.status_code != _JOB_RESPONSE_CODE:
-                error = (_('FAIL, status code not 202, code is: %(code), '
+                error = (_('An error occurred when attempting to export '
+                           'the system configuration. Status code: %(code), '
                            'Error details: %(err)'),
                          {'code': job_response.status_code,
                           'err': job_response.__dict__})
+                LOG.error(error)
                 raise exception.HardwareInspectionFailure(error=error)
 
             job_id = job_response.__dict__['headers']['Location']
             try:
                 job_id = re.search('JID_.+', job_id).group()
             except drac_exceptions.BaseClientException as exc:
-                LOG.error('FAIL: detailed error message: %(err)',
+                LOG.error('Unable to find the job id in response: %(err)',
                           {'err': job_response.__dict__['_content']})
                 raise exception.HardwareInspectionFailure(error=exc)
 
@@ -175,21 +174,35 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
                                   if ch.text == 'PXE']
                         if nic_id:
                             # Get MAC address of the given nic_id
-                            mac_response = requests.get('%s%s%s' % (
-                                redfish_ip, _MAC_URL, nic_id[0]), auth=(
-                                redfish_username, redfish_password),
-                                verify=False)
-                            mac_address = json.loads(mac_response.__dict__.get(
-                                '_content')).get('MACAddress')
+                            mac_address = self._get_mac_address(
+                                nic_id, redfish_ip,
+                                redfish_username, redfish_password)
                             pxe_dev_nics.append(mac_address)
                     return pxe_dev_nics
                 elif current_time.seconds >= _TIMEOUT_SECONDS:
-                    error = (_('FAIL, Timeout of %(second) seconds has been '
-                               'reached before marking the job completed.'),
+                    error = (_('The job to export the system configuration '
+                               'did not complete within %(second) seconds'),
                              {'second': _TIMEOUT_SECONDS})
                     raise exception.HardwareInspectionFailure(error=error)
                     break
         return pxe_dev_nics
+
+    def _get_mac_address(self, nic_id, redfish_ip, redfish_username,
+                         redfish_password):
+        """Get MAC address of the given nic id.
+
+        :param nic_id: id of the network interface controller (NIC).
+        :param redfish_ip: IP address of the redfish driver.
+        :param redfish_username: username of the redfish driver.
+        :param redfish_password: password of the redfish driver.
+        :returns: Returns MAC address of the given nic id.
+        """
+        mac_response = requests.get('%s%s%s' % (
+            redfish_ip, _MAC_URL, nic_id[0]), auth=(
+            redfish_username, redfish_password), verify=False)
+        mac_address = json.loads(mac_response.__dict__.get(
+            '_content')).get('MACAddress')
+        return mac_address
 
 
 class DracWSManInspect(base.InspectInterface):
