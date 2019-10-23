@@ -91,6 +91,7 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
         if pxe_dev_nics is None:
             LOG.warning("No PXE enabled NIC was found for node "
                         "%(node_uuid)s.", {'node_uuid': node.uuid})
+            return states.MANAGEABLE
 
         ports = objects.Port.list_by_node_id(task.context, node.id)
         if ports:
@@ -99,7 +100,7 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
                 if port.pxe_enabled != is_pxe_dev_nic:
                     port.pxe_enabled = is_pxe_dev_nic
                     port.save()
-                    LOG.info('Port updated with pxe enabled %(pxe)s '
+                    LOG.info('Port updated with pxe_enabled %(pxe)s '
                              'for node %(node_uuid)s during inspection',
                              {'pxe': port.pxe_enabled, 'node_uuid': node.uuid})
         else:
@@ -109,10 +110,10 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
         return states.MANAGEABLE
 
     def _get_pxe_dev_nics(self, task):
-        """Get a list of pxe device interfaces.
+        """Get a list of pxe device MAC addresses.
 
         :param task: a TaskManager instance.
-        :returns: Returns list of pxe device interfaces.
+        :returns: Returns list of pxe device MAC addresses.
         """
         system = redfish_utils.get_system(task.node)
 
@@ -132,7 +133,8 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
                     nic_id = system.bios.attributes[nic]
                     # Get MAC address of the given nic_id
                     mac_address = self._get_mac_address(
-                        nic_id, redfish_ip, redfish_username, redfish_password)
+                        [nic_id], redfish_ip, redfish_username,
+                        redfish_password)
                     pxe_dev_nics.append(mac_address)
 
         elif system.boot.mode == 'bios':
@@ -184,7 +186,6 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
                                'did not complete within %(second) seconds'),
                              {'second': _TIMEOUT_SECONDS})
                     raise exception.HardwareInspectionFailure(error=error)
-                    break
         return pxe_dev_nics
 
     def _get_mac_address(self, nic_id, redfish_ip, redfish_username,

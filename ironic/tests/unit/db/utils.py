@@ -425,6 +425,15 @@ def get_test_redfish_info():
     }
 
 
+def get_test_drac_redfish_info():
+    return {
+        "redfish_address": "https://192.168.110.13",
+        "redfish_system_id": "/redfish/v1/Systems/FAKESYSTEM",
+        "redfish_username": "root",
+        "redfish_password": "Dell0SS!"
+    }
+
+
 def get_test_portgroup(**kw):
     return {
         'id': kw.get('id', 654),
