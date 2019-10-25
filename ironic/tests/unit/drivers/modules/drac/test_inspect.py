@@ -18,6 +18,8 @@ Test class for DRAC inspection interface
 from dracclient import exceptions as drac_exceptions
 import mock
 from oslo_utils import importutils
+from oslo_utils import units
+import requests
 
 from ironic.common import exception
 from ironic.common import states
@@ -27,7 +29,6 @@ from ironic.drivers.modules.drac import inspect as drac_inspect
 from ironic.drivers.modules.drac.inspect import DracRedfishInspect
 from ironic.drivers.modules.redfish import utils as redfish_utils
 from ironic import objects
-from ironic.tests.unit.db import base as db_base
 from ironic.tests.unit.db import utils as db_utils
 from ironic.tests.unit.drivers.modules.drac import utils as test_utils
 from ironic.tests.unit.objects import utils as obj_utils
@@ -36,7 +37,7 @@ sushy = importutils.try_import('sushy')
 
 INFO_DICT = test_utils.INFO_DICT
 
-DRAC_REDFISH_INFO_DICT = db_utils.get_test_drac_redfish_info()
+DRAC_REDFISH_INFO_DICT = db_utils.get_test_redfish_info()
 
 
 class DracInspectionTestCase(test_utils.BaseDracTest):
@@ -389,8 +390,7 @@ class DracInspectionTestCase(test_utils.BaseDracTest):
             self.assertEqual(expected_pxe_nic, pxe_dev_nics)
 
 
-class DracRedfishInspectionTestCase(db_base.DbTestCase):
-
+class DracRedfishInspectionTestCase(test_utils.BaseDracTest):
     def setUp(self):
         super(DracRedfishInspectionTestCase, self).setUp()
         self.config(enabled_hardware_types=['idrac'],
@@ -410,6 +410,18 @@ class DracRedfishInspectionTestCase(db_base.DbTestCase):
             'PxeDev1Interface': 'NIC.Integrated.1-1-1',
             'PxeDev2Interface': None, 'PxeDev3Interface': None,
             'PxeDev4Interface': None}
+        system_mock.memory_summary.size_gib = 2
+
+        system_mock.processors.summary = '8', 'MIPS'
+
+        system_mock.simple_storage.disks_sizes_bytes = (
+            1 * units.Gi, units.Gi * 3, units.Gi * 5)
+        system_mock.storage.volumes_sizes_bytes = (
+            2 * units.Gi, units.Gi * 4, units.Gi * 6)
+
+        system_mock.ethernet_interfaces.summary = {
+            '00:11:22:33:44:55': sushy.STATE_ENABLED,
+            '66:77:88:99:AA:BB': sushy.STATE_DISABLED}
 
         return system_mock
 
@@ -419,44 +431,85 @@ class DracRedfishInspectionTestCase(db_base.DbTestCase):
         self.assertEqual(expected, driver.get_properties())
 
     @mock.patch.object(redfish_utils, 'get_system', autospec=True)
-    def test__get_pxe_dev_nics_with_UEFI_boot_mode(self, mock_get_system):
+    @mock.patch.object(DracRedfishInspect, '_get_mac_address', autospec=True)
+    def test__get_pxe_dev_nics_with_UEFI_boot_mode(
+            self, mock__get_mac_address, mock_get_system):
         system_mock = self.init_system_mock(mock_get_system.return_value)
         system_mock.boot.mode = 'uefi'
         expected_pxe_nic = ['24:6E:96:70:49:00']
+        mock__get_mac_address.return_value = '24:6E:96:70:49:00'
 
         with task_manager.acquire(self.context, self.node.uuid,
                                   shared=True) as task:
+            task.driver.inspect.inspect_hardware(task)
             pxe_dev_nics = task.driver.inspect._get_pxe_dev_nics(task)
             self.assertEqual(expected_pxe_nic, pxe_dev_nics)
 
+    @mock.patch.object(requests, 'get', autospec=True)
+    @mock.patch.object(requests, 'post', autospec=True)
     @mock.patch.object(redfish_utils, 'get_system', autospec=True)
-    def test__get_pxe_dev_nics_with_BIOS_boot_mode(self, mock_get_system):
+    @mock.patch.object(DracRedfishInspect, '_get_mac_address', autospec=True)
+    def test__get_pxe_dev_nics_with_BIOS_boot_mode(
+            self, mock__get_mac_address, mock_get_system, mock_post, mock_get):
         system_mock = self.init_system_mock(mock_get_system.return_value)
         system_mock.boot.mode = 'bios'
-        expected_pxe_nic = ['24:6E:96:70:49:04']
+        expected_pxe_nic = ['24:6E:96:70:49:00']
+        mock__get_mac_address.return_value = '24:6E:96:70:49:00'
+        mock_post.return_value.__dict__ = {'status_code': 202, 'headers': {
+            'Location': '/redfish/v1/TaskService/Tasks/JID_704694755409'}}
+        mock_get.return_value.__dict__ = {
+            '_content': '<SystemConfiguration Model="PowerEdge R640" '
+            'ServiceTag="7T1NHK2" TimeStamp="Wed Oct 16 11:38:17 2019"> \n '
+            '<Component FQDD="NIC.Slot.1-1-1"> \n '
+            '<Attribute Name="LegacyBootProto">NONE</Attribute> \n '
+            '</Component> \n <Component FQDD="NIC.Integrated.1-1-1"> \n '
+            '<Attribute Name="LegacyBootProto">PXE</Attribute> \n '
+            '</Component> \n </SystemConfiguration> '}
 
         with task_manager.acquire(self.context, self.node.uuid,
                                   shared=True) as task:
+            task.driver.inspect.inspect_hardware(task)
             pxe_dev_nics = task.driver.inspect._get_pxe_dev_nics(task)
             self.assertEqual(expected_pxe_nic, pxe_dev_nics)
 
+    @mock.patch.object(requests, 'get', autospec=True)
+    @mock.patch.object(requests, 'post', autospec=True)
     @mock.patch.object(redfish_utils, 'get_system', autospec=True)
-    def test__get_pxe_dev_nics_without_boot_mode(self, mock_get_system):
+    @mock.patch.object(DracRedfishInspect, '_get_mac_address', autospec=True)
+    def test__get_pxe_dev_nics_with_BIOS_boot_mode_timeout_fail(
+            self, mock__get_mac_address, mock_get_system, mock_post, mock_get):
+        system_mock = self.init_system_mock(mock_get_system.return_value)
+        system_mock.boot.mode = 'bios'
+        mock__get_mac_address.return_value = '24:6E:96:70:49:00'
+        mock_post.return_value.__dict__ = {'status_code': 202, 'headers': {
+            'Location': '/redfish/v1/TaskService/Tasks/JID_704694755409'}}
+        mock_get.return_value.__dict__ = {}
+
+        with task_manager.acquire(self.context, self.node.uuid,
+                                  shared=True) as task:
+            self.assertRaises(exception.HardwareInspectionFailure,
+                              task.driver.inspect._get_pxe_dev_nics, task)
+
+    @mock.patch.object(redfish_utils, 'get_system', autospec=True)
+    @mock.patch.object(DracRedfishInspect, '_get_mac_address', autospec=True)
+    def test__get_pxe_dev_nics_without_boot_mode(
+            self, mock__get_mac_address, mock_get_system):
         system_mock = self.init_system_mock(mock_get_system.return_value)
         system_mock.boot.mode = None
         expected_pxe_nic = []
+        mock__get_mac_address.return_value = None
 
         with task_manager.acquire(self.context, self.node.uuid,
                                   shared=True) as task:
+            task.driver.inspect.inspect_hardware(task)
             pxe_dev_nics = task.driver.inspect._get_pxe_dev_nics(task)
             self.assertEqual(expected_pxe_nic, pxe_dev_nics)
 
-    @mock.patch.object(redfish_utils, 'get_system', autospec=True)
     @mock.patch.object(DracRedfishInspect, '_get_pxe_dev_nics', autospec=True)
-    @mock.patch.object(DracRedfishInspect, 'inspect_hardware', autospec=True)
+    @mock.patch.object(redfish_utils, 'get_system', autospec=True)
     def test_inspect_hardware_without_pxe_dev_nics(
-            self, mock_get_system, mock__get_pxe_dev_nics,
-            mock_inspect_hardware):
+            self, mock_get_system, mock__get_pxe_dev_nics):
+        self.init_system_mock(mock_get_system.return_value)
         mock__get_pxe_dev_nics.return_value = None
 
         with task_manager.acquire(self.context, self.node.uuid,
@@ -465,3 +518,46 @@ class DracRedfishInspectionTestCase(db_base.DbTestCase):
                 task)
             self.assertIsNone(pxe_dev_nics)
             self.assertEqual(1, mock__get_pxe_dev_nics.call_count)
+
+    @mock.patch.object(objects.Port, 'list_by_node_id', autospec=True)
+    @mock.patch.object(DracRedfishInspect, '_get_pxe_dev_nics', autospec=True)
+    @mock.patch.object(redfish_utils, 'get_system', autospec=True)
+    def test_inspect_hardware_with_set_port_pxe_enabled(
+            self, mock_get_system, mock__get_pxe_dev_nics,
+            mock_list_by_node_id):
+        self.init_system_mock(mock_get_system.return_value)
+        mock__get_pxe_dev_nics.return_value = ['24:6E:96:70:49:00']
+
+        pxe_disabled_port = obj_utils.create_test_port(
+            self.context, uuid=self.node.uuid, node_id=self.node.id,
+            address='24:6E:96:70:49:00', pxe_enabled=False)
+        mock_list_by_node_id.return_value = [pxe_disabled_port]
+
+        with task_manager.acquire(self.context, self.node.uuid,
+                                  shared=True) as task:
+            task.driver.inspect.inspect_hardware(task)
+
+            port = mock_list_by_node_id.return_value
+            self.assertTrue(port[0].pxe_enabled)
+
+    @mock.patch.object(objects.Port, 'list_by_node_id', autospec=True)
+    @mock.patch.object(DracRedfishInspect, '_get_pxe_dev_nics', autospec=True)
+    @mock.patch.object(redfish_utils, 'get_system', autospec=True)
+    def test_inspect_hardware_with_set_port_pxe_disabled(
+            self, mock_get_system, mock__get_pxe_dev_nics,
+            mock_list_by_node_id):
+        self.init_system_mock(mock_get_system.return_value)
+        mock__get_pxe_dev_nics.return_value = ['24:6E:96:70:49:00']
+
+        pxe_enabled_port = obj_utils.create_test_port(
+            self.context, uuid=self.node.uuid,
+            node_id=self.node.id, address='24:6E:96:70:49:01',
+            pxe_enabled=True)
+        mock_list_by_node_id.return_value = [pxe_enabled_port]
+
+        with task_manager.acquire(self.context, self.node.uuid,
+                                  shared=True) as task:
+            task.driver.inspect.inspect_hardware(task)
+
+            port = mock_list_by_node_id.return_value
+            self.assertFalse(port[0].pxe_enabled)
