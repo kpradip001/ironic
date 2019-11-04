@@ -203,7 +203,7 @@ class DracRedfishInspect(redfish_inspect.RedfishInspect):
             redfish_username, redfish_password), verify=False)
         mac_address = json.loads(mac_response.__dict__.get(
             '_content')).get('MACAddress')
-        return mac_address
+        return mac_address.upper()
 
 
 class DracWSManInspect(base.InspectInterface):
