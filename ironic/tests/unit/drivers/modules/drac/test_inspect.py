@@ -441,7 +441,6 @@ class DracRedfishInspectionTestCase(test_utils.BaseDracTest):
 
         with task_manager.acquire(self.context, self.node.uuid,
                                   shared=True) as task:
-            task.driver.inspect.inspect_hardware(task)
             pxe_dev_nics = task.driver.inspect._get_pxe_dev_nics(task)
             self.assertEqual(expected_pxe_nic, pxe_dev_nics)
 
@@ -468,7 +467,6 @@ class DracRedfishInspectionTestCase(test_utils.BaseDracTest):
 
         with task_manager.acquire(self.context, self.node.uuid,
                                   shared=True) as task:
-            task.driver.inspect.inspect_hardware(task)
             pxe_dev_nics = task.driver.inspect._get_pxe_dev_nics(task)
             self.assertEqual(expected_pxe_nic, pxe_dev_nics)
 
